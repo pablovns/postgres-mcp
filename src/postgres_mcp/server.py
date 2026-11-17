@@ -24,6 +24,9 @@ from .artifacts import ExplainPlanArtifact
 from .database_health import DatabaseHealthTool
 from .database_health import HealthType
 from .explain import ExplainPlanTool
+from .formatting import apply_safe_limit
+from .formatting import format_object_details
+from .formatting import format_tabular_output
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import LLMOptimizerTool
 from .index.presentation import TextPresentation
@@ -107,7 +110,7 @@ async def list_schemas() -> ResponseType:
             """
         )
         schemas = [row.cells for row in rows] if rows else []
-        return format_text_response(schemas)
+        return format_text_response(format_tabular_output(schemas))
     except Exception as e:
         logger.error(f"Error listing schemas: {e}")
         return format_error_response(str(e))
@@ -181,7 +184,7 @@ async def list_objects(
         else:
             return format_error_response(f"Unsupported object type: {object_type}")
 
-        return format_text_response(objects)
+        return format_text_response(format_tabular_output(objects))
     except Exception as e:
         logger.error(f"Error listing objects: {e}")
         return format_error_response(str(e))
@@ -198,9 +201,21 @@ async def get_object_details(
     schema_name: str = Field(description="Schema name"),
     object_name: str = Field(description="Object name"),
     object_type: str = Field(description="Object type: 'table', 'view', 'sequence', or 'extension'", default="table"),
+    max_cell_chars: int = Field(description="Maximum characters per cell before truncation (default 300)", default=300),
+    full_text: bool = Field(description="When True, disables cell character truncation", default=False),
 ) -> ResponseType:
     """Get detailed information about a database object."""
     try:
+        if not isinstance(object_type, str):
+            object_type = str(getattr(object_type, "default", "table"))
+        if not isinstance(max_cell_chars, int):
+            try:
+                max_cell_chars = int(getattr(max_cell_chars, "default", 300))
+            except Exception:
+                max_cell_chars = 300
+        if not isinstance(full_text, bool):
+            full_text = bool(getattr(full_text, "default", False))
+
         sql_driver = await get_sql_driver()
 
         if object_type in ("table", "view"):
@@ -320,7 +335,7 @@ async def get_object_details(
         else:
             return format_error_response(f"Unsupported object type: {object_type}")
 
-        return format_text_response(result)
+        return format_text_response(format_object_details(result, max_cell_chars=max_cell_chars, full_text=full_text))
     except Exception as e:
         logger.error(f"Error getting object details: {e}")
         return format_error_response(str(e))
@@ -414,14 +429,55 @@ If there is no hypothetical index, you can pass an empty list.""",
 # Query function declaration without the decorator - we'll add it dynamically based on access mode
 async def execute_sql(
     sql: str = Field(description="SQL to run", default="all"),
+    max_rows: int = Field(
+        description="Maximum number of rows to return (default 100). Applies a safe LIMIT to SELECT/WITH queries without a smaller explicit LIMIT.",
+        default=100,
+    ),
+    max_cell_chars: int = Field(
+        description="Maximum characters per cell before truncation (default 300). Use full_text=True to disable.",
+        default=300,
+    ),
+    full_text: bool = Field(
+        description="When True, disables cell character truncation, returning complete text for all columns.",
+        default=False,
+    ),
 ) -> ResponseType:
     """Executes a SQL query against the database."""
     try:
+        if not isinstance(max_rows, int):
+            try:
+                max_rows = int(getattr(max_rows, "default", 100))
+            except Exception:
+                max_rows = 100
+        if not isinstance(max_cell_chars, int):
+            try:
+                max_cell_chars = int(getattr(max_cell_chars, "default", 300))
+            except Exception:
+                max_cell_chars = 300
+        if not isinstance(full_text, bool):
+            full_text = bool(getattr(full_text, "default", False))
+
         sql_driver = await get_sql_driver()
-        rows = await sql_driver.execute_query(sql)  # type: ignore
+        effective_query, enforced_max_rows = apply_safe_limit(sql, max_rows=max_rows)
+        rows = await sql_driver.execute_query(effective_query)  # type: ignore
         if rows is None:
             return format_text_response("No results")
-        return format_text_response(list([r.cells for r in rows]))
+
+        row_dicts = [r.cells for r in rows]
+        truncated = False
+        limit_to_check = enforced_max_rows if enforced_max_rows is not None else (max_rows if max_rows > 0 else None)
+        if limit_to_check is not None and len(row_dicts) > limit_to_check:
+            truncated = True
+            row_dicts = row_dicts[:limit_to_check]
+
+        output = format_tabular_output(
+            row_dicts,
+            max_cell_chars=max_cell_chars,
+            full_text=full_text,
+            truncated=truncated,
+            max_rows=limit_to_check,
+        )
+        return format_text_response(output)
     except Exception as e:
         logger.error(f"Error executing query: {e}")
         return format_error_response(str(e))
