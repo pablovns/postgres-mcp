@@ -44,13 +44,18 @@ def format_cell_value(
     else:
         cell_str = str(val)
 
-    # Normalize line breaks and tabs to guarantee strictly 1 line per row
-    cell_str = cell_str.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n").replace("\t", "\\t")
+    raw_len = len(cell_str)
+    # Early truncation fast path for large cells: avoid escaping megabytes of text
+    if not full_text and max_cell_chars > 0 and raw_len > max_cell_chars:
+        prefix = cell_str[: max_cell_chars + 1]
+        if "\n" in prefix or "\t" in prefix or "\r" in prefix:
+            prefix = prefix.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n").replace("\t", "\\t")
+        diff = raw_len - max_cell_chars
+        return f"{prefix[:max_cell_chars]}...[+{diff} chars]"
 
-    # Cell truncation
-    if not full_text and max_cell_chars > 0 and len(cell_str) > max_cell_chars:
-        diff = len(cell_str) - max_cell_chars
-        cell_str = f"{cell_str[:max_cell_chars]}...[+{diff} chars]"
+    # Fast path for common cells: skip replace passes if no newlines/tabs
+    if "\n" in cell_str or "\t" in cell_str or "\r" in cell_str:
+        cell_str = cell_str.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n").replace("\t", "\\t")
 
     return cell_str
 

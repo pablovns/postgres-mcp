@@ -184,6 +184,7 @@ class SqlDriver:
         query: LiteralString,
         params: list[Any] | None = None,
         force_readonly: bool = False,
+        max_rows: int | None = None,
     ) -> Optional[List[RowResult]]:
         """
         Execute a query and return results.
@@ -192,6 +193,7 @@ class SqlDriver:
             query: SQL query to execute
             params: Query parameters
             force_readonly: Whether to enforce read-only mode
+            max_rows: Optional limit of rows to fetch from the cursor
 
         Returns:
             List of RowResult objects or None on error
@@ -207,9 +209,13 @@ class SqlDriver:
                 # For pools, get a connection from the pool
                 pool = await self.conn.pool_connect()
                 async with pool.connection() as connection:
+                    if max_rows is not None:
+                        return await self._execute_with_connection(connection, query, params, force_readonly=force_readonly, max_rows=max_rows)
                     return await self._execute_with_connection(connection, query, params, force_readonly=force_readonly)
             else:
                 # Direct connection approach
+                if max_rows is not None:
+                    return await self._execute_with_connection(self.conn, query, params, force_readonly=force_readonly, max_rows=max_rows)
                 return await self._execute_with_connection(self.conn, query, params, force_readonly=force_readonly)
         except Exception as e:
             # Mark pool as invalid if there was a connection issue
@@ -221,7 +227,7 @@ class SqlDriver:
 
             raise e
 
-    async def _execute_with_connection(self, connection, query, params, force_readonly) -> Optional[List[RowResult]]:
+    async def _execute_with_connection(self, connection, query, params, force_readonly, max_rows: int | None = None) -> Optional[List[RowResult]]:
         """Execute query with the given connection."""
         transaction_started = False
         try:
@@ -248,8 +254,11 @@ class SqlDriver:
                         transaction_started = False
                     return None
 
-                # Get results from the last statement only
-                rows = await cursor.fetchall()
+                # Optimization: fetch limited rows if max_rows is specified
+                if max_rows is not None and max_rows > 0:
+                    rows = await cursor.fetchmany(max_rows)
+                else:
+                    rows = await cursor.fetchall()
 
                 # End the transaction appropriately
                 if not force_readonly:
@@ -258,7 +267,8 @@ class SqlDriver:
                     await cursor.execute("ROLLBACK")
                     transaction_started = False
 
-                return [SqlDriver.RowResult(cells=dict(row)) for row in rows]
+                # Optimization: row is already a dict from dict_row, avoid redundant dict(row) copy
+                return [SqlDriver.RowResult(cells=row) for row in rows]
 
         except Exception as e:
             # Try to roll back the transaction if it's still active

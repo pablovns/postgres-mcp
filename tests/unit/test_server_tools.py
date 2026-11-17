@@ -88,8 +88,8 @@ async def test_execute_sql_preserves_smaller_explicit_limit_without_truncation_w
         text = result[0].text  # type: ignore
         assert "(5 rows)" in text
         assert "[Truncated" not in text
-        # Verify query executed without rewriting
-        mock_sql_driver.execute_query.assert_awaited_once_with("SELECT id FROM numbers LIMIT 5")
+        # Verify query executed without rewriting, with fetch limit passed
+        mock_sql_driver.execute_query.assert_awaited_once_with("SELECT id FROM numbers LIMIT 5", max_rows=101)
 
 
 @pytest.mark.asyncio

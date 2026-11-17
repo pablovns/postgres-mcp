@@ -132,17 +132,44 @@ async def list_objects(
         sql_driver = await get_sql_driver()
 
         if object_type in ("table", "view"):
-            table_type = "BASE TABLE" if object_type == "table" else "VIEW"
-            rows = await SafeSqlDriver.execute_param_query(
-                sql_driver,
-                """
-                SELECT table_schema, table_name, table_type
-                FROM information_schema.tables
-                WHERE table_schema = {} AND table_type = {}
-                ORDER BY table_name
-                """,
-                [schema_name, table_type],
-            )
+            if object_type == "table":
+                rows = await SafeSqlDriver.execute_param_query(
+                    sql_driver,
+                    """
+                    SELECT
+                        n.nspname AS table_schema,
+                        c.relname AS table_name,
+                        CASE c.relkind
+                            WHEN 'r' THEN 'BASE TABLE'
+                            WHEN 'p' THEN 'PARTITIONED TABLE'
+                            ELSE 'BASE TABLE'
+                        END AS table_type
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = {} AND c.relkind IN ('r', 'p')
+                    ORDER BY c.relname
+                    """,
+                    [schema_name],
+                )
+            else:
+                rows = await SafeSqlDriver.execute_param_query(
+                    sql_driver,
+                    """
+                    SELECT
+                        n.nspname AS table_schema,
+                        c.relname AS table_name,
+                        CASE c.relkind
+                            WHEN 'v' THEN 'VIEW'
+                            WHEN 'm' THEN 'MATERIALIZED VIEW'
+                            ELSE 'VIEW'
+                        END AS table_type
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = {} AND c.relkind IN ('v', 'm')
+                    ORDER BY c.relname
+                    """,
+                    [schema_name],
+                )
             objects = (
                 [{"schema": row.cells["table_schema"], "name": row.cells["table_name"], "type": row.cells["table_type"]} for row in rows]
                 if rows
@@ -153,10 +180,15 @@ async def list_objects(
             rows = await SafeSqlDriver.execute_param_query(
                 sql_driver,
                 """
-                SELECT sequence_schema, sequence_name, data_type
-                FROM information_schema.sequences
-                WHERE sequence_schema = {}
-                ORDER BY sequence_name
+                SELECT
+                    n.nspname AS sequence_schema,
+                    c.relname AS sequence_name,
+                    format_type(s.seqtypid, null) AS data_type
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_sequence s ON s.seqrelid = c.oid
+                WHERE n.nspname = {} AND c.relkind = 'S'
+                ORDER BY c.relname
                 """,
                 [schema_name],
             )
@@ -219,14 +251,21 @@ async def get_object_details(
         sql_driver = await get_sql_driver()
 
         if object_type in ("table", "view"):
-            # Get columns
+            # Get columns from pg_catalog
             col_rows = await SafeSqlDriver.execute_param_query(
                 sql_driver,
                 """
-                SELECT column_name, data_type, is_nullable, column_default
-                FROM information_schema.columns
-                WHERE table_schema = {} AND table_name = {}
-                ORDER BY ordinal_position
+                SELECT
+                    a.attname AS column_name,
+                    format_type(a.atttypid, a.atttypmod) AS data_type,
+                    CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+                    pg_get_expr(d.adbin, d.adrelid) AS column_default
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                WHERE n.nspname = {} AND c.relname = {} AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attnum
                 """,
                 [schema_name, object_name],
             )
@@ -244,16 +283,28 @@ async def get_object_details(
                 else []
             )
 
-            # Get constraints
+            # Get constraints from pg_catalog
             con_rows = await SafeSqlDriver.execute_param_query(
                 sql_driver,
                 """
-                SELECT tc.constraint_name, tc.constraint_type, kcu.column_name
-                FROM information_schema.table_constraints AS tc
-                LEFT JOIN information_schema.key_column_usage AS kcu
-                  ON tc.constraint_name = kcu.constraint_name
-                 AND tc.table_schema = kcu.table_schema
-                WHERE tc.table_schema = {} AND tc.table_name = {}
+                SELECT
+                    con.conname AS constraint_name,
+                    CASE con.contype
+                        WHEN 'p' THEN 'PRIMARY KEY'
+                        WHEN 'u' THEN 'UNIQUE'
+                        WHEN 'f' THEN 'FOREIGN KEY'
+                        WHEN 'c' THEN 'CHECK'
+                        WHEN 'x' THEN 'EXCLUDE'
+                        ELSE con.contype::text
+                    END AS constraint_type,
+                    att.attname AS column_name
+                FROM pg_constraint con
+                JOIN pg_class c ON c.oid = con.conrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                LEFT JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS cols(attnum, ord) ON true
+                LEFT JOIN pg_attribute att ON att.attrelid = c.oid AND att.attnum = cols.attnum
+                WHERE n.nspname = {} AND c.relname = {}
+                ORDER BY con.conname, cols.ord
                 """,
                 [schema_name, object_name],
             )
@@ -296,9 +347,16 @@ async def get_object_details(
             rows = await SafeSqlDriver.execute_param_query(
                 sql_driver,
                 """
-                SELECT sequence_schema, sequence_name, data_type, start_value, increment
-                FROM information_schema.sequences
-                WHERE sequence_schema = {} AND sequence_name = {}
+                SELECT
+                    n.nspname AS sequence_schema,
+                    c.relname AS sequence_name,
+                    format_type(s.seqtypid, null) AS data_type,
+                    s.seqstart AS start_value,
+                    s.seqincrement AS increment
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_sequence s ON s.seqrelid = c.oid
+                WHERE n.nspname = {} AND c.relname = {} AND c.relkind = 'S'
                 """,
                 [schema_name, object_name],
             )
@@ -459,13 +517,17 @@ async def execute_sql(
 
         sql_driver = await get_sql_driver()
         effective_query, enforced_max_rows = apply_safe_limit(sql, max_rows=max_rows)
-        rows = await sql_driver.execute_query(effective_query)  # type: ignore
+        limit_to_check = enforced_max_rows if enforced_max_rows is not None else (max_rows if max_rows > 0 else None)
+        fetch_limit = limit_to_check + 1 if limit_to_check is not None else None
+        exec_kwargs: dict[str, Any] = {}
+        if fetch_limit is not None:
+            exec_kwargs["max_rows"] = fetch_limit
+        rows = await sql_driver.execute_query(effective_query, **exec_kwargs)  # type: ignore
         if rows is None:
             return format_text_response("No results")
 
         row_dicts = [r.cells for r in rows]
         truncated = False
-        limit_to_check = enforced_max_rows if enforced_max_rows is not None else (max_rows if max_rows > 0 else None)
         if limit_to_check is not None and len(row_dicts) > limit_to_check:
             truncated = True
             row_dicts = row_dicts[:limit_to_check]

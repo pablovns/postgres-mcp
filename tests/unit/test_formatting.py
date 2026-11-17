@@ -63,6 +63,25 @@ class TestFormatCellValue:
         formatted = format_cell_value(long_val, max_cell_chars=0)
         assert formatted == long_val
 
+    def test_early_truncation_large_string_performance(self):
+        import time
+
+        # 5 MB string
+        huge_val = "hello world\n" * 450000
+        start = time.perf_counter()
+        formatted = format_cell_value(huge_val, max_cell_chars=300)
+        duration = time.perf_counter() - start
+
+        # Must execute in under 20ms (typically <0.05ms) thanks to prefix slicing
+        assert duration < 0.05
+        assert formatted.startswith("hello world\\n")
+        assert formatted.endswith(f"...[+{len(huge_val) - 300} chars]")
+
+    def test_clean_string_fast_path(self):
+        clean_val = "simple_identifier_12345"
+        formatted = format_cell_value(clean_val)
+        assert formatted == clean_val
+
 
 class TestFormatTabularOutput:
     def test_empty_rows(self):

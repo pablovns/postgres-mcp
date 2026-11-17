@@ -28,14 +28,19 @@ def mock_connection():
 
     # Make the cursor behave like an async context manager
     cursor.aenter = cursor
+    cursor.__aenter__.return_value = cursor
+    cursor.__aexit__.return_value = None
 
     # Configure cursor context manager
     cursor_cm = AsyncContextManagerMock()
     cursor_cm.aenter = cursor
+    cursor_cm.__aenter__.return_value = cursor
+    cursor_cm.__aexit__.return_value = None
     connection.cursor.return_value = cursor_cm
 
     # Configure cursor.description to return a value (indicating results)
     cursor.description = ["column1", "column2"]
+    cursor.nextset = MagicMock(return_value=False)
 
     # Configure fetchall to return some mock data
     cursor.fetchall.return_value = [
@@ -365,3 +370,17 @@ async def test_engine_url_connection():
         # Verify driver state
         assert driver.is_pool is True
         assert driver.conn is not None
+
+
+@pytest.mark.asyncio
+async def test_execute_query_with_max_rows_uses_fetchmany(mock_connection):
+    """Test that specifying max_rows uses cursor.fetchmany instead of cursor.fetchall."""
+    connection, cursor = mock_connection
+    cursor.fetchmany = AsyncMock(return_value=[{"id": 1, "name": "test1"}])
+
+    driver = SqlDriver(conn=connection)
+    result = await driver.execute_query("SELECT * FROM test", max_rows=5)
+
+    assert result is not None
+    assert len(result) == 1
+    cursor.fetchmany.assert_awaited_once_with(5)
